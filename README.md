@@ -72,9 +72,9 @@ modprobe -r ib_umad
 modprobe -r ib_cm
 modprobe -r iw_cm
 modprobe -r rdma_cm
-modprobe -r ib_uverbs
-modprobe -r mlx5_ib
-modprobe -r mlx5_core
+//modprobe -r ib_uverbs
+//modprobe -r mlx5_ib
+//modprobe -r mlx5_core
 ```
 
 ---
