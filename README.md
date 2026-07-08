@@ -1,453 +1,479 @@
-# NCCL Tests Setup and Execution Guide
+# NCCL Setup and Validation Guide (Kubernetes + NVIDIA Network Operator + MPI Operator)
 
-NVIDIA Collective Communications Library (NCCL) provides high-performance communication primitives optimized for NVIDIA GPUs and multi-GPU systems. The `nccl-tests` repository provides benchmarks to measure communication performance within a node and across multiple nodes.
-
----
-
-## References
-
-* NCCL Tests: https://github.com/NVIDIA/nccl-tests
-* NCCL Repository: https://github.com/NVIDIA/nccl
-* NCCL Installation Guide: https://docs.nvidia.com/deeplearning/nccl/install-guide/index.html
+This document describes the complete setup required to run NCCL AllReduce validation jobs on Kubernetes using InfiniBand/RDMA networking.
 
 ---
 
-## Prerequisites
+# 1. Install NVIDIA/Mellanox OFED Driver
 
-### Hardware Requirements
-
-* NVIDIA GPUs (A100, H100, L40S, etc.)
-* NVIDIA Driver installed
-* CUDA-compatible system
-
-For multi-node testing:
-
-* InfiniBand or RoCE network
-* Passwordless SSH between nodes
-* MPI installed on all nodes
-
----
-
-# Method 1: NCCL Tests Using Docker (Single Node)
-
-## Pull NVIDIA CUDA Container
+## Configure RDMA Modules to Persist Across Reboot
 
 ```bash
-docker pull nvcr.io/nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
-```
-
-## Launch Container
-
-```bash
-docker run -it --rm \
-  --gpus all \
-  --shm-size=16g \
-  --ulimit memlock=-1 \
-  --ulimit stack=67108864 \
-  nvcr.io/nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 bash
+cat > /etc/modules-load.d/mlx5.conf << 'EOF'
+mlx5_core
+mlx5_ib
+ib_uverbs
+rdma_ucm
+ib_umad
+nvidia_peermem
+EOF
 ```
 
 ---
 
-## Install Dependencies
+## Prepare Node for OFED Installation
+
+### Cordoning and Draining Kubernetes Node
 
 ```bash
-apt update
+kubectl cordon <node>
 
-apt install -y \
-  git \
-  build-essential \
-  cmake \
-  gcc-12 \
-  g++-12 \
-  libnccl2 \
-  libnccl-dev \
-  rdma-core \
-  infiniband-diags \
-  ibverbs-utils \
-  iproute2
+kubectl drain <node> \
+  --ignore-daemonsets \
+  --delete-emptydir-data
 ```
 
 ---
 
-## Clone NCCL Tests
+### Stop Storage and RDMA Services
 
 ```bash
-git clone https://github.com/NVIDIA/nccl-tests.git
-cd nccl-tests
+unmount <wekavolume>
+
+systemctl stop ibacm srp_daemon
+
+weka local stop -f
 ```
 
 ---
 
-## Build NCCL Tests
-
-### Generic Build
+### Verify No Process is Using InfiniBand Devices
 
 ```bash
-make MPI=0 CUDA_HOME=/usr/local/cuda
-```
-
-### Build for H100 (SM90)
-
-```bash
-make MPI=0 \
-  CUDA_HOME=/usr/local/cuda \
-  NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90"
-```
-
----
-
-## Run Single-Node NCCL Benchmark
-
-Example: Run on all 8 GPUs of a server.
-
-```bash
-./build/all_reduce_perf \
-  -b 8M \
-  -e 1G \
-  -f 2 \
-  -g 8
-```
-
-### Parameters
-
-| Parameter | Description                        |
-| --------- | ---------------------------------- |
-| `-b`      | Starting message size              |
-| `-e`      | Maximum message size               |
-| `-f`      | Message size multiplication factor |
-| `-g`      | Number of GPUs per process         |
-
----
-
-# Method 2: NCCL Tests with MPI (Single Node and Multi-Node)
-
-This method is required for benchmarking communication across multiple nodes.
-
----
-
-## Install CUDA Toolkit
-
-### Download CUDA
-
-```bash
-wget https://developer.download.nvidia.com/compute/cuda/12.4.0/local_installers/cuda_12.4.0_550.54.14_linux.run
-```
-
-### Install CUDA
-
-```bash
-sudo sh cuda_12.4.0_550.54.14_linux.run
-```
-
-### Configure Environment Variables
-
-```bash
-echo 'export PATH=/usr/local/cuda-12.4/bin:$PATH' >> ~/.bashrc
-echo 'export LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
-
-source ~/.bashrc
-```
-
-### Verify Installation
-
-```bash
-nvcc -V
-```
-
----
-
-## Install PyTorch (Optional)
-
-```bash
-pip install torch==2.6.0 \
-  torchvision==0.21.0 \
-  torchaudio==2.6.0 \
-  --index-url https://download.pytorch.org/whl/cu124
-```
-
----
-
-## Install MPI
-
-```bash
-sudo apt update
-
-sudo apt install -y \
-  openmpi-bin \
-  libopenmpi-dev
-```
-
-### Verify Installation
-
-```bash
-mpirun --version
-mpicc --version
-which mpirun
-```
-
----
-
-## Install NCCL
-
-```bash
-sudo apt install \
-  libnccl2=2.20.5-1+cuda12.4 \
-  libnccl-dev=2.20.5-1+cuda12.4
-```
-
-### Verify Installation
-
-```bash
-dpkg -l | grep nccl
-ldconfig -p | grep nccl
-find / -name "nccl.h" 2>/dev/null
-```
-
----
-
-## Clone NCCL Tests
-
-```bash
-cd /opt
-git clone https://github.com/NVIDIA/nccl-tests.git
-cd nccl-tests
-```
-
----
-
-## Configure MPI Environment
-
-```bash
-export CPATH=/usr/lib/x86_64-linux-gnu/openmpi/include:$CPATH
-export LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/openmpi/lib:$LIBRARY_PATH
-```
-
----
-
-## Build NCCL Tests with MPI Support
-
-```bash
-make -j$(nproc) \
-  MPI=1 \
-  CUDA_HOME=/usr/local/cuda-12.4 \
-  NCCL_HOME=/usr
-```
-
----
-
-# Single-Node MPI Benchmark
-
-Run one MPI process per GPU.
-
-Example: 8 GPUs on a single server.
-
-```bash
-mpirun \
-  -np 8 \
-  --allow-run-as-root \
-  ./build/all_reduce_perf \
-  -b 8 \
-  -e 8G \
-  -f 2 \
-  -g 1
-```
-
-### Parameters
-
-| Parameter  | Description            |
-| ---------- | ---------------------- |
-| `-np 8`    | Launch 8 MPI processes |
-| `-g 1`     | One GPU per process    |
-| Total GPUs | 8                      |
-
----
-
-# Multi-Node Benchmark
-
-## Step 1: Configure Passwordless SSH
-
-All nodes must be able to SSH into each other without passwords.
-
-Example:
-
-```bash
-ssh node1
-ssh node2
-```
-
----
-
-## Step 2: Create a Host File
-
-Example `hosts.txt`:
-
-```text
-node1 slots=8
-node2 slots=8
-```
-
-or
-
-```text
-192.168.1.101 slots=8
-192.168.1.102 slots=8
-```
-
----
-
-## Step 3: Verify MPI Connectivity
-
-```bash
-mpirun \
-  -np 2 \
-  -hostfile hosts.txt \
-  hostname
+lsof /dev/infiniband/uverbs* 2>/dev/null
 ```
 
 Expected output:
 
 ```text
-node1
-node2
+EMPTY
 ```
 
 ---
 
-## Run Multi-Node NCCL Benchmark
+### Unload Existing RDMA Driver Stack
+
+```bash
+modprobe -r ib_srp
+modprobe -r ib_iser
+modprobe -r rpcrdma
+modprobe -r rdma_ucm
+modprobe -r ib_umad
+modprobe -r ib_cm
+modprobe -r iw_cm
+modprobe -r rdma_cm
+modprobe -r ib_uverbs
+modprobe -r mlx5_ib
+modprobe -r mlx5_core
+```
+
+---
+
+### Verify Drivers are Fully Unloaded
+
+```bash
+lsmod | grep -E "mlx5|ib_core"
+```
+
+Expected:
+
+```text
+No output
+```
+
+---
+
+## Install MOFED on Host
+
+Download and install MOFED:
+
+```bash
+wget https://content.mellanox.com/ofed/MLNX_OFED-24.10-0.7.0.0/MLNX_OFED_LINUX-24.10-0.7.0.0-ubuntu22.04-x86_64.tgz
+
+tar xzf MLNX_OFED_LINUX-24.10-0.7.0.0-ubuntu22.04-x86_64.tgz
+
+cd MLNX_OFED_LINUX-24.10-0.7.0.0-ubuntu22.04-x86_64
+
+./mlnxofedinstall --without-fw-update --force
+```
+
+---
+
+### Remove Intel RDMA Driver (If Present)
+
+```bash
+modprobe -r irdma
+```
+
+---
+
+### Restart OpenIB Stack
+
+```bash
+/etc/init.d/openibd start
+```
+
+---
+
+## Reboot Requirement
+
+Perform a **power cycle** of the node after installation.
+
+---
+
+## Post-Reboot Validation
+
+### Verify Required Modules Loaded
+
+```bash
+lsmod | grep -E "mlx5_core|mlx5_ib|ib_uverbs|ib_core"
+```
+
+---
+
+### Verify RDMA Interfaces
+
+```bash
+rdma link | wc -l
+```
+
+Expected:
+
+```text
+8
+```
+
+---
+
+### Verify Bond Interface
+
+```bash
+cat /proc/net/bonding/bond0 | grep "MII Status"
+```
+
+Expected:
+
+```text
+MII Status: up
+```
+
+---
+
+### Verify MOFED Driver
+
+```bash
+modinfo mlx5_ib | grep filename
+```
+
+This confirms whether the node is using:
+
+* Inbox driver
+* MOFED driver
+
+---
+
+### Verify OpenIB Service
+
+```bash
+/etc/init.d/openibd status
+```
+
+---
+
+### Load GPUDirect RDMA Peer Memory Module
+
+```bash
+sudo modprobe nvidia_peermem
+```
+
+Verify:
+
+```bash
+lsmod | grep nvidia_peermem
+```
+
+Expected:
+
+```text
+nvidia_peermem
+```
+
+---
+
+# 2. Install NVIDIA Network Operator
+
+## Helm Values
+
+Create `values.yaml`
+
+```yaml
+nfd:
+  enabled: true
+```
+
+---
+
+## Install Network Operator
+
+```bash
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
+helm repo update
+
+helm install network-operator nvidia/network-operator \
+  -n nvidia-network-operator \
+  --create-namespace \
+  -f values.yaml
+```
+
+---
+
+## Create NicClusterPolicy
+
+Create `nicclusterpolicy.yaml`
+
+```yaml
+apiVersion: mellanox.com/v1alpha1
+kind: NicClusterPolicy
+metadata:
+  name: nic-cluster-policy
+spec:
+  sriovDevicePlugin:
+    image: sriov-network-device-plugin
+    repository: nvcr.io/nvidia/mellanox
+    version: network-operator-v25.7.0
+    imagePullSecrets: []
+    config: |
+      {
+        "resourceList": [
+          {
+            "resourcePrefix": "nvidia.com",
+            "resourceName": "hostdev",
+            "selectors": {
+              "vendors": ["15b3"],
+              "isRdma": true
+            }
+          }
+        ]
+      }
+
+  secondaryNetwork:
+    cniPlugins:
+      image: plugins
+      repository: nvcr.io/nvidia/mellanox
+      version: network-operator-v25.7.0
+      imagePullSecrets: []
+
+    multus:
+      image: multus-cni
+      repository: nvcr.io/nvidia/mellanox
+      version: network-operator-v25.7.0
+      imagePullSecrets: []
+
+    ipamPlugin:
+      image: whereabouts
+      repository: nvcr.io/nvidia/mellanox
+      version: network-operator-v25.7.0
+      imagePullSecrets: []
+```
+
+Apply:
+
+```bash
+kubectl apply -f nicclusterpolicy.yaml
+```
+
+---
+
+## Verify Network Operator
+
+```bash
+kubectl get nicclusterpolicy
+```
+
+Expected:
+
+```text
+STATE = ready
+```
+
+---
+
+### Verify RDMA Resource Exposure
+
+```bash
+kubectl describe node <worker-node>
+```
+
+Expected resource:
+
+```text
+nvidia.com/hostdev
+```
+
+---
+
+# 3. Install MPI Operator
+
+Install MPI Operator CRDs and controller:
+
+```bash
+kubectl apply --server-side \
+  -f https://raw.githubusercontent.com/kubeflow/mpi-operator/master/deploy/v2beta1/mpi-operator.yaml
+```
+
+---
+
+## Verify MPI Operator
+
+```bash
+kubectl get pods -n mpi-operator
+```
+
+Expected:
+
+```text
+mpi-operator Running
+```
+
+---
+
+# 4. Deploy NCCL AllReduce Validation Job
+
+Apply NCCL validation workload:
+
+```bash
+kubectl apply -f nccl-all-reduce.yaml
+```
+
+---
+
+## Monitor Job Status
+
+```bash
+kubectl get pods
+```
+
+---
+
+## View NCCL Logs
+
+Identify launcher pod:
+
+```bash
+kubectl get pods
+```
+
+Example:
+
+```text
+nccl-allreduce-launcher
+```
+
+Follow logs:
+
+```bash
+kubectl logs -f <launcher-pod-name>
+```
 
 Example:
 
 ```bash
-mpirun \
-  -np 16 \
-  -N 2 \
-  -hostfile hosts.txt \
-  ./build/all_reduce_perf \
-  -b 8 \
-  -e 8G \
-  -f 2 \
-  -g 1
+kubectl logs -f nccl-allreduce-launcher
 ```
-
-### Parameters
-
-| Parameter   | Description                 |
-| ----------- | --------------------------- |
-| `-np 16`    | Total MPI processes         |
-| `-N 2`      | MPI processes per node      |
-| `-hostfile` | List of participating nodes |
-| `-g 1`      | One GPU per process         |
 
 ---
 
-# Recommended NCCL Environment Variables
+# 5. Validation Checklist
 
-For InfiniBand or RoCE deployments:
+Verify all of the following before running NCCL benchmarks:
+
+| Check                         | Expected   |
+| ----------------------------- | ---------- |
+| MOFED Installed               | Yes        |
+| openibd Running               | Yes        |
+| nvidia_peermem Loaded         | Yes        |
+| RDMA Links                    | 8          |
+| Bond Interface                | Up         |
+| Network Operator              | Ready      |
+| NicClusterPolicy              | Ready      |
+| SR-IOV Device Plugin          | Running    |
+| Multus                        | Running    |
+| MPI Operator                  | Running    |
+| `nvidia.com/hostdev` Resource | Present    |
+| NCCL Job Pods                 | Running    |
+| NCCL AllReduce                | Successful |
+
+---
+
+# Useful Troubleshooting Commands
+
+### RDMA Devices
+
+```bash
+ibv_devices
+```
+
+```bash
+ibstat
+```
+
+```bash
+rdma link
+```
+
+---
+
+### Kubernetes RDMA Resources
+
+```bash
+kubectl get nodes -o json | jq '.items[].status.allocatable'
+```
+
+---
+
+### Network Operator
+
+```bash
+kubectl get pods -n nvidia-network-operator
+```
+
+```bash
+kubectl logs -n nvidia-network-operator deployment/network-operator
+```
+
+---
+
+### MPI Jobs
+
+```bash
+kubectl get mpijobs
+```
+
+```bash
+kubectl describe mpijob <job-name>
+```
+
+---
+
+### NCCL Debugging
+
+Inside NCCL job containers:
 
 ```bash
 export NCCL_DEBUG=INFO
 export NCCL_IB_DISABLE=0
-export NCCL_SOCKET_IFNAME=eth0
-export NCCL_IB_GID_INDEX=3
-export NCCL_NET_GDR_LEVEL=2
+export NCCL_P2P_DISABLE=0
+export NCCL_NET_GDR_LEVEL=SYS
 ```
 
----
-
-# Useful Diagnostic Commands
-
-## GPU Topology
-
-```bash
-nvidia-smi topo -m
-```
-
-## Check GPU Availability
-
-```bash
-nvidia-smi
-```
-
-## Check InfiniBand Devices
-
-```bash
-ibstat
-ibv_devices
-ibdev2netdev
-```
-
-## Check MPI Installation
-
-```bash
-mpirun --version
-mpicc --version
-```
-
----
-
-# Additional NCCL Benchmarks
-
-### AllReduce
-
-```bash
-./build/all_reduce_perf -b 8M -e 8G -f 2 -g 8
-```
-
-### AllGather
-
-```bash
-./build/all_gather_perf -b 8M -e 8G -f 2 -g 8
-```
-
-### Broadcast
-
-```bash
-./build/broadcast_perf -b 8M -e 8G -f 2 -g 8
-```
-
-### ReduceScatter
-
-```bash
-./build/reduce_scatter_perf -b 8M -e 8G -f 2 -g 8
-```
-
----
-
-# Troubleshooting
-
-## NCCL Libraries Not Found
-
-```bash
-ldconfig -p | grep nccl
-dpkg -l | grep nccl
-```
-
-## MPI Compilation Errors
-
-```bash
-which mpicc
-which mpirun
-```
-
-Ensure the following variables are set:
-
-```bash
-export CPATH=/usr/lib/x86_64-linux-gnu/openmpi/include:$CPATH
-export LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/openmpi/lib:$LIBRARY_PATH
-```
-
-## InfiniBand Devices Not Detected
-
-```bash
-ibstat
-ibv_devices
-```
-
-## Enable NCCL Debugging
-
-```bash
-export NCCL_DEBUG=INFO
-```
-
-Then rerun the benchmark to inspect transport selection and communication paths.
+Verify NCCL detects InfiniBand instead of falling back to TCP sockets.
