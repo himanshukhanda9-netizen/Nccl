@@ -1,0 +1,39 @@
+apiVersion: mellanox.com/v1alpha1
+kind: NicClusterPolicy
+metadata:
+  name: nic-cluster-policy
+spec:
+  sriovDevicePlugin:
+    image: sriov-network-device-plugin
+    repository: nvcr.io/nvidia/mellanox
+    version: network-operator-v25.7.0
+    imagePullSecrets: []
+    config: |
+      {
+        "resourceList": [
+          {
+            "resourcePrefix": "nvidia.com",
+            "resourceName": "hostdev",
+            "selectors": {
+              "vendors": ["15b3"],
+              "isRdma": true
+            }
+          }
+        ]
+      }
+  secondaryNetwork:
+    cniPlugins:
+      image: plugins
+      repository: nvcr.io/nvidia/mellanox
+      version: network-operator-v25.7.0
+      imagePullSecrets: []
+    multus:
+      image: multus-cni
+      repository: nvcr.io/nvidia/mellanox
+      version: network-operator-v25.7.0
+      imagePullSecrets: []
+    ipamPlugin:
+      image: whereabouts
+      repository: nvcr.io/nvidia/mellanox
+      version: network-operator-v25.7.0
+      imagePullSecrets: []
